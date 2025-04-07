@@ -1,0 +1,64 @@
+services:
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/html:/usr/share/nginx/html
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+      - ./nginx/logs:/var/log/nginx/host
+    networks:
+      - nginx-network
+    command: sh -c "while :; do sleep 6h; nginx -s reload; done & nginx -g 'daemon off;'"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"    # 限制容器日誌大小
+        max-file: "3"      # 限制日誌文件數量
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: certbot
+    restart: always
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/logs:/var/log/letsencrypt
+    networks:
+      - nginx-network
+    entrypoint: sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --post-hook 'touch /etc/letsencrypt/renewal/.updated'; sleep 12h; done;"
+
+  # 監控證書更新並重起Nginx的容器
+  certbot-watcher:
+    image: alpine:latest
+    container_name: certbot-watcher
+    restart: always
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - nginx
+      - certbot
+    networks:
+      - nginx-network
+    entrypoint: >
+      sh -c "
+      apk add --no-cache docker-cli &&
+      while :; do
+        if [ -f /etc/letsencrypt/renewal/.updated ]; then
+          echo 'Certificate renewed, reloading Nginx...' &&
+          docker exec nginx nginx -s reload &&
+          rm -f /etc/letsencrypt/renewal/.updated;
+        fi;
+        sleep 30;
+      done
+      "
+
+networks:
+  nginx-network:
+    driver: bridge
