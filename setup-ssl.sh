@@ -1,67 +1,124 @@
 #!/bin/bash
+set -euo pipefail
 
-# 設置參數
-DOMAIN="example.com"
-EMAIL="email@example.com"
-CF_API_TOKEN="cloudflare-api-token" # Zone DNS Token
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
 
+# --- Parse args ---
+ACME_SERVER="https://acme-v02.api.letsencrypt.org/directory"
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --staging)
+            ACME_SERVER="https://acme-staging-v02.api.letsencrypt.org/directory"
+            echo "Using staging ACME server (certs won't be trusted by browsers)"
+            ;;
+        --force)
+            FORCE=1
+            ;;
+        -h|--help)
+            cat <<EOF
+Usage: $0 [--staging] [--force]
 
-# 建立目錄
-mkdir -p nginx/conf.d
-mkdir -p nginx/html
-mkdir -p certbot/conf
-mkdir -p certbot/www
-mkdir -p certbot/logs
-mkdir -p certbot/conf/renewal
-
-# 複製默認設定文件到nginx設定目錄
-if [ ! -f nginx/conf.d/$DOMAIN.conf ]; then
-    cp default.conf nginx/conf.d/$DOMAIN.conf
-fi
-
-# 建立 Cloudflare 憑證文件
-cat > certbot/conf/cloudflare.ini << EOF
-dns_cloudflare_api_token = $CF_API_TOKEN
+  --staging   Use Let's Encrypt staging endpoint (no rate limit, untrusted certs)
+              Use this for testing — switch back to production after success.
+  --force     Re-issue cert even if one already exists.
+              Counts against LE rate limit (5/week/domain).
 EOF
-chmod 600 certbot/conf/cloudflare.ini
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg (try --help)" >&2
+            exit 1
+            ;;
+    esac
+done
 
-# 為内網域名生成SSL憑證
-# 使用DNS驗證方式，這樣内網域名也可以獲取證書
-docker run -it --rm \
-  -v $(pwd)/certbot/conf:/etc/letsencrypt \
-  -v $(pwd)/certbot/logs:/var/log/letsencrypt \
-  -e CF_API_TOKEN=$CF_API_TOKEN \
-  certbot/dns-cloudflare:latest certonly \
-  --dns-cloudflare \
-  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-  -d $DOMAIN \
-  -d *.$DOMAIN \
-  --email $EMAIL \
-  --agree-tos \
-  --no-eff-email \
-  --server https://acme-v02.api.letsencrypt.org/directory
+# --- Require .env ---
+if [ ! -f .env ]; then
+    echo "Error: .env not found. Run: cp .env.example .env (and fill in values)" >&2
+    exit 1
+fi
+chmod 600 .env
 
-# 建立證書更新的 Hook Script
-cat > certbot/conf/renewal-hooks/post/reload-nginx.sh << EOF
+# --- Robust .env parser (no `source` — avoids arbitrary code execution) ---
+load_env() {
+    local file="$1"
+    local line key value
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+        if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            value="${value%\"}"; value="${value#\"}"
+            value="${value%\'}"; value="${value#\'}"
+            export "$key=$value"
+        fi
+    done < "$file"
+}
+load_env .env
+
+: "${DOMAIN:?DOMAIN not set in .env}"
+: "${EMAIL:?EMAIL not set in .env}"
+: "${CF_API_TOKEN:?CF_API_TOKEN not set in .env}"
+
+# --- Create directory structure ---
+mkdir -p \
+    nginx/html \
+    certbot/conf \
+    certbot/www \
+    certbot/logs \
+    certbot/secrets \
+    certbot/signal \
+    certbot/conf/renewal-hooks/post
+
+# --- Cloudflare credentials (outside certbot/conf so nginx :ro mount can't see it) ---
+cat > certbot/secrets/cloudflare.ini <<EOF
+dns_cloudflare_api_token = ${CF_API_TOKEN}
+EOF
+chmod 600 certbot/secrets/cloudflare.ini
+
+# --- Renewal hook: signal watcher via shared volume (not certbot's own dirs) ---
+cat > certbot/conf/renewal-hooks/post/reload-nginx.sh <<'EOF'
 #!/bin/sh
-touch /etc/letsencrypt/renewal/.updated
+touch /signal/reload
 EOF
 chmod +x certbot/conf/renewal-hooks/post/reload-nginx.sh
 
-# 建立更新標記的目錄
-mkdir -p certbot/conf/renewal/
-
-# 替换 Nginx 設定文件中的域名
-# 根據系統類型使用不同的 sed 命令
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS
-    sed -i '' "s/example.com/$DOMAIN/g" nginx/conf.d/$DOMAIN.conf
-else
-    # Linux
-    sed -i "s/example.com/$DOMAIN/g" nginx/conf.d/$DOMAIN.conf
+# --- Sample index.html ---
+if [ ! -f nginx/html/index.html ]; then
+    cat > nginx/html/index.html <<'EOF'
+<!doctype html>
+<html><body><h1>It works.</h1></body></html>
+EOF
 fi
 
-# 建立範例HTML網頁
-echo "<html><body><h1>Hello from Nginx on ARM!</h1></body></html>" > nginx/html/index.html
+# --- Skip cert issuance if one already exists ---
+if [ -f "certbot/conf/live/${DOMAIN}/fullchain.pem" ] && [ "${FORCE}" -ne 1 ]; then
+    echo "Cert already exists for ${DOMAIN}."
+    echo "Use --force to reissue (counts against Let's Encrypt rate limit)."
+    echo "Setup complete. Next: docker compose up -d"
+    exit 0
+fi
 
-echo "Setup completed. Now you can run docker-compose up -d"
+# --- Issue cert via Cloudflare DNS-01 (supports wildcard) ---
+docker run --rm \
+    -v "${SCRIPT_DIR}/certbot/conf:/etc/letsencrypt" \
+    -v "${SCRIPT_DIR}/certbot/logs:/var/log/letsencrypt" \
+    -v "${SCRIPT_DIR}/certbot/secrets/cloudflare.ini:/run/secrets/cloudflare.ini:ro" \
+    certbot/dns-cloudflare:v2.11.0 certonly \
+    --dns-cloudflare \
+    --dns-cloudflare-credentials /run/secrets/cloudflare.ini \
+    --dns-cloudflare-propagation-seconds 30 \
+    -d "${DOMAIN}" \
+    -d "*.${DOMAIN}" \
+    --email "${EMAIL}" \
+    --agree-tos \
+    --no-eff-email \
+    --non-interactive \
+    --server "${ACME_SERVER}"
+
+echo
+echo "Setup complete. Next: docker compose up -d"
