@@ -47,6 +47,8 @@ watcher 需要呼叫 `docker exec nginx nginx -s reload`。直接掛 `/var/run/d
 - **reload 失敗時不要刪 signal 檔**。`docker exec nginx -s reload` 失敗（daemon hiccup / nginx 異常）就要留著等下次重試
 - **不要重複設定 reload 機制**。`renewal-hooks/post/` 目錄一個就夠了，不要再加 `--post-hook` 旗標（兩個觸發點維護者會搞糊塗）
 - **不要在 nginx 容器加 reload loop**。watcher 已負責，多加只是雜訊
+- **不要再加 `ssl_stapling on`**。Let's Encrypt 從 2024 年中起發的 leaf cert 已不再內嵌 OCSP responder URL，加了會出現 `"ssl_stapling" ignored` 警告。一併不需要 `ssl_trusted_certificate` 與 `resolver`（兩者都是為 OCSP stapling 服務的）
+- **nginx healthcheck 要打 HTTPS**。HTTP 80 端口永遠 301 → HTTPS，wget --spider 跟著 redirect 後因 SNI 不是 localhost 而失敗。用 `wget --no-check-certificate --spider https://localhost/`
 - **不要重新引入下列腳本**：
   - `auto-renew.sh`：certbot service 已正確設定 DNS 驗證
   - `nginx-log-cleanup.sh`：Docker `json-file` driver 已輪替
