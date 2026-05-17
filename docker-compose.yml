@@ -1,64 +1,88 @@
 services:
   nginx:
-    image: nginx:latest
+    image: nginx:1.27-alpine
     container_name: nginx
-    restart: always
+    restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
+    env_file: .env
     volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d
-      - ./nginx/html:/usr/share/nginx/html
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
-      - ./nginx/logs:/var/log/nginx/host
-    networks:
-      - nginx-network
-    command: sh -c "while :; do sleep 6h; nginx -s reload; done & nginx -g 'daemon off;'"
+      - ./default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/html:/usr/share/nginx/html:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"    # 限制容器日誌大小
-        max-file: "3"      # 限制日誌文件數量
+        max-size: "10m"
+        max-file: "3"
 
   certbot:
-    image: certbot/certbot:latest
+    image: certbot/dns-cloudflare:v2.11.0
     container_name: certbot
-    restart: always
+    restart: unless-stopped
     volumes:
       - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
       - ./certbot/logs:/var/log/letsencrypt
-    networks:
-      - nginx-network
-    entrypoint: sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --post-hook 'touch /etc/letsencrypt/renewal/.updated'; sleep 12h; done;"
+      - ./certbot/secrets/cloudflare.ini:/run/secrets/cloudflare.ini:ro
+      - ./certbot/signal:/signal
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew
+        --dns-cloudflare
+        --dns-cloudflare-credentials /run/secrets/cloudflare.ini
+        --dns-cloudflare-propagation-seconds 30
+        --non-interactive;
+        sleep 12h;
+      done"
 
-  # 監控證書更新並重起Nginx的容器
-  certbot-watcher:
-    image: alpine:latest
-    container_name: certbot-watcher
-    restart: always
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      POST: 1
+      EXEC: 1
     volumes:
-      - ./certbot/conf:/etc/letsencrypt:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - watcher-net
+
+  certbot-watcher:
+    image: docker:24-cli
+    container_name: certbot-watcher
+    restart: unless-stopped
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
+    volumes:
+      - ./certbot/signal:/signal
     depends_on:
       - nginx
       - certbot
+      - docker-proxy
     networks:
-      - nginx-network
+      - watcher-net
     entrypoint: >
-      sh -c "
-      apk add --no-cache docker-cli &&
-      while :; do
-        if [ -f /etc/letsencrypt/renewal/.updated ]; then
-          echo 'Certificate renewed, reloading Nginx...' &&
-          docker exec nginx nginx -s reload &&
-          rm -f /etc/letsencrypt/renewal/.updated;
+      sh -c "while :; do
+        if [ -f /signal/reload ]; then
+          echo 'Certificate renewed, reloading Nginx...';
+          if docker exec nginx nginx -s reload; then
+            rm -f /signal/reload;
+          else
+            echo 'Reload failed, will retry next cycle' >&2;
+          fi;
         fi;
         sleep 30;
-      done
-      "
+      done"
 
 networks:
-  nginx-network:
-    driver: bridge
+  watcher-net:
