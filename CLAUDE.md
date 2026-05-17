@@ -48,7 +48,8 @@ watcher 需要呼叫 `docker exec nginx nginx -s reload`。直接掛 `/var/run/d
 - **不要重複設定 reload 機制**。`renewal-hooks/post/` 目錄一個就夠了，不要再加 `--post-hook` 旗標（兩個觸發點維護者會搞糊塗）
 - **不要在 nginx 容器加 reload loop**。watcher 已負責，多加只是雜訊
 - **不要再加 `ssl_stapling on`**。Let's Encrypt 從 2024 年中起發的 leaf cert 已不再內嵌 OCSP responder URL，加了會出現 `"ssl_stapling" ignored` 警告。一併不需要 `ssl_trusted_certificate` 與 `resolver`（兩者都是為 OCSP stapling 服務的）
-- **nginx healthcheck 要打 HTTPS**。HTTP 80 端口永遠 301 → HTTPS，wget --spider 跟著 redirect 後因 SNI 不是 localhost 而失敗。用 `wget --no-check-certificate --spider https://localhost/`
+- **nginx healthcheck 要打內部 `/health`**。打 `/` 會被 proxy 到上游 :3000，導致「上游掛 = healthcheck 失敗 = 容器被當成不健康」這種誤判。內部 `location = /health { return 200; }` 才反映 nginx 本身的存活
+- **上游服務用 `host.docker.internal` 指到 host**。Linux 上要在 compose 加 `extra_hosts: - "host.docker.internal:host-gateway"`，否則 nginx 容器內這個名稱不解析。**注意**：host 上的服務必須 bind 到 `0.0.0.0` 或 docker bridge IP（如 `172.17.0.1`），bind 在 `127.0.0.1` 從容器看不到
 - **不要重新引入下列腳本**：
   - `auto-renew.sh`：certbot service 已正確設定 DNS 驗證
   - `nginx-log-cleanup.sh`：Docker `json-file` driver 已輪替
@@ -114,3 +115,4 @@ setup-ssl.sh 是 idempotent — 偵測到 `certbot/conf/live/${DOMAIN}/fullchain
 - [ ] watcher 的 `rm` 還是 conditional on reload success
 - [ ] reload 觸發只有一個來源（`renewal-hooks/post/`），沒有重複的 `--post-hook`
 - [ ] 改了 `default.conf.template` 後重啟 nginx（不需要動 nginx/conf.d/）
+- [ ] **不要嘗試 `docker exec nginx vi /etc/nginx/conf.d/...`**。那個檔是 envsubst 從 template 渲染的臨時檔，重啟就被覆蓋；template 本身也是 `:ro` 掛載。要改 → 改 host 上的 `default.conf.template` → `docker compose restart nginx`
