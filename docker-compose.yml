@@ -7,13 +7,17 @@ services:
       - "80:80"
       - "443:443"
     env_file: .env
+    extra_hosts:
+      # Lets nginx reach services bound on the host's network namespace.
+      # On Linux Docker resolves "host-gateway" to the host's bridge IP.
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./default.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./nginx/html:/usr/share/nginx/html:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
     healthcheck:
-      test: ["CMD", "wget", "--no-check-certificate", "-q", "--spider", "https://localhost/"]
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "--spider", "https://localhost/health"]
       interval: 30s
       timeout: 5s
       retries: 3
