@@ -1,0 +1,96 @@
+# Skeleton vhost. This file is NOT loaded by nginx (extension is .example,
+# not .conf). `add-domain.sh` copies this into ${DOMAIN}.conf and substitutes
+# DOMAIN / UPSTREAM_HOST / UPSTREAM_PORT / UPSTREAM_PATH placeholders.
+#
+# After generation: edit the proxy_pass target, uncomment any of the example
+# blocks at the bottom that fit your needs, and `docker compose up -d
+# --force-recreate nginx`.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__ www.__DOMAIN__;
+
+    include /etc/nginx/snippets/acme-challenge.conf;
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name __DOMAIN__ www.__DOMAIN__;
+
+    ssl_certificate     /etc/letsencrypt/live/__DOMAIN__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__DOMAIN__/privkey.pem;
+
+    include /etc/nginx/snippets/ssl-common.conf;
+    include /etc/nginx/snippets/security-headers.conf;
+    include /etc/nginx/snippets/gzip.conf;
+
+    # Internal liveness probe for the docker healthcheck. Decoupled from upstream
+    # so the container is "healthy" even if the app on :__UPSTREAM_PORT__ is down.
+    location = /health {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    location / {
+        proxy_pass http://__UPSTREAM_HOST__:__UPSTREAM_PORT____UPSTREAM_PATH__;
+        include /etc/nginx/snippets/proxy-headers.conf;
+    }
+
+    # =========================================================================
+    # COOKBOOK — examples below are commented out. Uncomment + edit as needed.
+    # =========================================================================
+
+    # --- Route a sub-path to a different backend -----------------------------
+    # Use when /api/* should hit a different service than /. The trailing slash
+    # on proxy_pass is significant: with `/` here, nginx strips the `/api/`
+    # prefix before forwarding (so the backend sees `/users`, not `/api/users`).
+    #
+    # location /api/ {
+    #     proxy_pass http://api-backend:8080/;
+    #     include /etc/nginx/snippets/proxy-headers.conf;
+    # }
+
+    # --- Serve static files from a path --------------------------------------
+    # `/usr/share/nginx/html` is mounted from `./nginx/html` on the host.
+    #
+    # location /assets/ {
+    #     root /usr/share/nginx/html;
+    #     access_log off;
+    #     expires 7d;
+    #     add_header Cache-Control "public, immutable";
+    # }
+
+    # --- Block a path entirely -----------------------------------------------
+    #
+    # location ~ ^/(admin|internal)/ {
+    #     return 403;
+    # }
+
+    # --- Restrict by source IP -----------------------------------------------
+    # Note: nginx sees the docker bridge IP if behind Cloudflare proxy; use
+    # the real_ip module if you need accurate client IPs.
+    #
+    # location /private/ {
+    #     allow 10.0.0.0/8;
+    #     deny all;
+    #     proxy_pass http://__UPSTREAM_HOST__:__UPSTREAM_PORT__/private/;
+    #     include /etc/nginx/snippets/proxy-headers.conf;
+    # }
+
+    # --- Rate limit a path ---------------------------------------------------
+    # Requires a matching `limit_req_zone` in vhosts/00-http-globals.conf:
+    #   limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
+    #
+    # location /login {
+    #     limit_req zone=login burst=10 nodelay;
+    #     proxy_pass http://__UPSTREAM_HOST__:__UPSTREAM_PORT__;
+    #     include /etc/nginx/snippets/proxy-headers.conf;
+    # }
+}

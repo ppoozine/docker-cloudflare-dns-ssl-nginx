@@ -1,5 +1,5 @@
 .env
-certbot/
-nginx/
 .idea/
 *.log
+certbot/
+nginx/html/
