@@ -6,13 +6,15 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    env_file: .env
     extra_hosts:
       # Lets nginx reach services bound on the host's network namespace.
       # On Linux Docker resolves "host-gateway" to the host's bridge IP.
+      # Upstream services must bind to 0.0.0.0 (or the bridge IP) — NOT
+      # 127.0.0.1, which is not reachable from inside the container.
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/snippets:/etc/nginx/snippets:ro
+      - ./nginx/vhosts:/etc/nginx/conf.d:ro
       - ./nginx/html:/usr/share/nginx/html:ro
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro

@@ -1,164 +1,295 @@
 # docker-cloudflare-dns-ssl-nginx
 
-在 Docker（ARM / x86 皆可）上部署 Nginx + Let's Encrypt SSL，使用 Cloudflare DNS-01 取得**通配符證書**，自動續期、自動重載。
+A small, opinionated stack for running Nginx with Let's Encrypt SSL on a single
+Docker host (ARM or x86). It uses Cloudflare DNS-01 validation so it supports
+**wildcard certs** and **origins that aren't reachable from the public internet**
+(internal services, EC2 behind a strict security group, etc.).
 
-適合：個人站、內網服務、無法暴露於公網的伺服器。
+This repo is intentionally scoped to be a learning-grade scaffold — not a
+turnkey product. If you just want "set it and forget it," consider Caddy. If
+you want to understand how nginx + certbot + reverse proxying actually fit
+together, this is for you.
 
-## 前置需求
+## What you get
 
-- Docker 與 Docker Compose v2 (`docker compose`)
-- 已託管於 Cloudflare 的網域
-- Cloudflare API Token（權限：`Zone:DNS:Edit`，限定到對應 Zone）
+- Nginx serving any number of vhosts, each in its own `nginx/vhosts/<domain>.conf`
+- Wildcard Let's Encrypt certs via Cloudflare DNS-01, refreshed automatically
+- Self-healing renewal flow with a docker-socket-proxy in front of the reload watcher
+- A reverse-proxy pattern for forwarding to apps on the host (`host.docker.internal:<port>`)
+- An external cert-expiry probe (`check-cert-expiry.sh`) for catching silent failures
 
-## 快速開始
+## Prerequisites
+
+- Docker and Docker Compose v2 (`docker compose`)
+- A domain on Cloudflare
+- A Cloudflare API token scoped to `Zone:DNS:Edit` for that zone (NOT the Global API Key)
+
+## Running it
+
+### Fresh deploy
 
 ```bash
+git clone <repo> && cd docker-cloudflare-dns-ssl-nginx
+
+# 1. Set secrets
 cp .env.example .env
-# 編輯 .env 填入 DOMAIN / EMAIL / CF_API_TOKEN
+$EDITOR .env                          # EMAIL, CF_API_TOKEN
 
-# 強烈建議：先用 staging 端點測試（不會撞 Let's Encrypt rate limit）
-./setup-ssl.sh --staging
+# 2. One-time bootstrap (dirs + cloudflare.ini + renewal hook + sample html)
+./bootstrap.sh
 
-# 確認 staging 流程 OK 後，刪掉 staging 證書再申請正式的
-rm -rf certbot/conf/live certbot/conf/archive certbot/conf/renewal
-./setup-ssl.sh
+# 3. Add your first domain (issues wildcard cert + scaffolds the vhost)
+./add-domain.sh example.com           # defaults: host.docker.internal:3000
 
+# 4. (optional) Review and edit the generated vhost
+$EDITOR nginx/vhosts/example.com.conf
+
+# 5. Start the stack
 docker compose up -d
 ```
 
-### `setup-ssl.sh` 參數
+Before opening port 443 to the public internet:
+- AWS / firewall: allow inbound 80 and 443 to this host
+- Cloudflare DNS: point your domain at this host's IP
+  - "Proxied" (orange cloud): set SSL/TLS mode to **Full (strict)** in CF
+  - "DNS only" (gray cloud): simpler, but exposes the origin IP
 
-| 參數 | 用途 |
-|------|------|
-| `--staging` | 用 Let's Encrypt staging 端點。沒有 rate limit，但證書瀏覽器不信。**Debug 時必用** |
-| `--force` | 即使證書已存在仍重新申請。**會消耗正式 rate limit（5/週/域名）** |
-| `--help` | 印出說明 |
+### Updating after a `git pull`
 
-預設行為：偵測到 `certbot/conf/live/${DOMAIN}/fullchain.pem` 已存在就跳過申請，不會浪費 rate limit。
+```bash
+cd ~/<project-dir>
+git pull
 
-## 架構
+# Compose definition changes (image versions, healthcheck, etc.):
+docker compose up -d
 
-```
-┌─────────┐         ┌──────────┐         ┌──────────────────┐
-│ certbot │ touch   │ /signal/ │  poll   │ certbot-watcher  │
-│ (renew  ├────────►│ reload   │◄────────┤ (docker exec     │
-│  12h)   │         │          │         │  nginx reload)   │
-└─────────┘         └──────────┘         └────────┬─────────┘
-                                                   │
-                                                   ▼
-                                          ┌──────────────────┐
-                                          │  docker-proxy    │
-                                          │  (限制只能 exec) │
-                                          └────────┬─────────┘
-                                                   │
-                                                   ▼
-                                          /var/run/docker.sock
+# Pure config changes (snippets, vhosts) — compose can't see them since
+# they're bind-mounted, so force-recreate nginx to re-read:
+docker compose up -d --force-recreate nginx
 ```
 
-| 容器 | 鏡像 | 角色 |
-|------|------|------|
-| `nginx` | `nginx:1.27-alpine` | 對外服務 HTTP/HTTPS，啟動時用 `envsubst` 渲染 `default.conf.template` |
-| `certbot` | `certbot/dns-cloudflare:v2.11.0` | 每 12h 嘗試 `certbot renew`（DNS-01，無 propagation 短於 30s 的風險） |
-| `docker-proxy` | `tecnativa/docker-socket-proxy:0.3.0` | 限制 watcher 能呼叫的 docker API（只開放 exec、containers、post） |
-| `certbot-watcher` | `docker:24-cli` | 偵測 `/signal/reload` 標記檔，透過 docker-proxy 呼叫 `nginx -s reload` |
+When in doubt, `--force-recreate nginx` is always safe.
 
-### 為什麼有 `docker-proxy`？
+### Adding another domain to a running stack
 
-直接把 `/var/run/docker.sock` 掛進 watcher = watcher 被攻破就 = host root。`docker-socket-proxy` 是個白名單代理，只允許 watcher 呼叫 `POST /containers/.../exec`，無法 create / delete / pull 其他東西。
-
-### 為什麼用 envsubst 而不是 sed？
-
-nginx 官方 alpine 鏡像啟動時會自動處理 `/etc/nginx/templates/*.template` → `/etc/nginx/conf.d/*.conf`，把 `${DOMAIN}` 之類的環境變數替換掉。好處：
-
-- 改 `default.conf.template` 後重啟 nginx 立刻生效，不會有「忘了同步 nginx/conf.d/...」的飄移問題
-- 不需要在初始化腳本裡寫平台相依的 `sed -i`
-- `nginx` 變數 `$host`、`$uri` 不會被替換（envsubst 只認 `${...}` 帶大括號的）
-
-## 為什麼用 DNS 驗證
-
-- **支援通配符**：HTTP-01 / webroot **不支援** `*.example.com`
-- **不需要公網可達**：內網伺服器也能拿到正式證書
-- **一張證書涵蓋所有子域名**：新子域名不用重申請
-
-## 新增子域名
-
-通配符證書已涵蓋所有子域名，只需在 `default.conf.template` 加 `server` 區塊：
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name api.${DOMAIN};
-    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-    # ...
-}
+```bash
+./add-domain.sh another.example.com --upstream-port 4000
+$EDITOR nginx/vhosts/another.example.com.conf
+docker compose up -d --force-recreate nginx
 ```
 
-然後 `docker compose restart nginx`。
+### Verifying the deploy
 
-## 證書到期監控（強烈建議）
+```bash
+# All four containers up, nginx is "healthy"
+docker compose ps
 
-容器內續期可能靜默失敗（API token 失效、CF 改 API、容器被 OOM 等）。**一定要**設外部監控：
+# Nginx config parses cleanly inside the container
+docker exec nginx nginx -t
 
-### 方法 A：用內建腳本 + cron
+# Healthcheck history
+docker inspect nginx --format='{{json .State.Health}}' | python3 -m json.tool
+
+# Internal liveness probe (doesn't hit the upstream)
+curl -kI https://localhost/health -H "Host: example.com"
+
+# Real cert path through public DNS
+curl -I https://example.com
+```
+
+If nginx is `unhealthy`, check `docker logs nginx`. If `curl https://example.com`
+returns `403 server: cloudflare`, see Troubleshooting below — the most common
+cause is **not** Cloudflare bot protection.
+
+### Customizing the upstream
+
+```bash
+# Different port on the host
+./add-domain.sh app.example.com --upstream-port 8080
+
+# Another container (must share a docker network with nginx)
+./add-domain.sh api.example.com --upstream-host api-svc --upstream-port 8080
+
+# Internal IP on another machine
+./add-domain.sh foo.com --upstream-host 10.0.0.5 --upstream-port 8080
+
+# Append a sub-path to the upstream URL (request /users → upstream /v1/users)
+./add-domain.sh foo.com --upstream-port 3000 --upstream-path /v1/
+
+# All flags combined
+./add-domain.sh foo.com \
+    --upstream-host 10.0.0.5 \
+    --upstream-port 8080 \
+    --upstream-path /api/
+```
+
+For more complex layouts (mix static + proxy, route paths to different
+backends, rate limiting, IP allowlists), the generated vhost includes a
+cookbook of commented examples — uncomment and edit them.
+
+### Adding more domains later
+
+```bash
+./add-domain.sh another-domain.com --upstream-port 4000
+$EDITOR nginx/vhosts/another-domain.com.conf
+docker compose up -d --force-recreate nginx       # picks up new vhost
+```
+
+Each call to `add-domain.sh`:
+- issues a wildcard cert (skipped if one already exists; `--force` to override)
+- scaffolds `nginx/vhosts/<domain>.conf` from `nginx/vhosts/_example.conf.example`
+- never overwrites an existing vhost file (use `--force-vhost` for that)
+
+### Testing without burning rate limit
+
+```bash
+./add-domain.sh test.example.com --staging
+```
+
+Staging certs aren't browser-trusted but you can issue them unlimited times.
+When you're happy with the flow, clear the staging cert and reissue without
+`--staging`:
+
+```bash
+rm -rf certbot/conf/live/test.example.com \
+       certbot/conf/archive/test.example.com \
+       certbot/conf/renewal/test.example.com.conf
+./add-domain.sh test.example.com
+```
+
+## Architecture
+
+Four containers:
+
+| Container | Image | Role |
+|-----------|-------|------|
+| `nginx` | `nginx:1.27-alpine` | Public-facing HTTP(S); loads `nginx/vhosts/*.conf` and includes `nginx/snippets/*.conf` |
+| `certbot` | `certbot/dns-cloudflare:v2.11.0` | Every 12h runs `certbot renew` (DNS-01) |
+| `docker-proxy` | `tecnativa/docker-socket-proxy:0.3.0` | Whitelist proxy in front of `/var/run/docker.sock` |
+| `certbot-watcher` | `docker:24-cli` | Detects renewal signal, asks docker-proxy to `nginx -s reload` |
+
+Renewal flow:
+
+```
+certbot renew (success)
+  → certbot/conf/renewal-hooks/post/reload-nginx.sh
+  → touch /signal/reload (shared volume between certbot and watcher)
+  → watcher polls every 30s
+  → docker exec nginx nginx -s reload  (via docker-proxy)
+  → on success, rm /signal/reload  (on failure, leave it for next cycle)
+```
+
+### Why a docker-socket-proxy?
+
+Bind-mounting `/var/run/docker.sock` directly into the watcher gives it root
+on the host. The proxy is a tiny daemon that whitelists only the API endpoints
+the watcher actually needs (`CONTAINERS`, `POST`, `EXEC`). If the watcher is
+compromised, the blast radius is "can run `docker exec`," not "can do
+anything to the daemon."
+
+### Why per-domain config files?
+
+Nginx natively `include`s `/etc/nginx/conf.d/*.conf`, so giving each domain
+its own file is the standard pattern. Adding a new domain becomes
+"new file" instead of "edit a shared template," with no risk of breaking
+existing vhosts.
+
+Common settings (SSL, security headers, gzip, proxy headers) live in
+`nginx/snippets/*.conf` and are pulled in via `include`. A new vhost is
+roughly 25 lines of glue.
+
+## Reverse proxy to host apps
+
+`nginx/vhosts/_example.conf.example` proxies to `http://host.docker.internal:<port>`.
+On Linux, that name only resolves because `docker-compose.yml` maps it to
+`host-gateway` via `extra_hosts`.
+
+**Your upstream service must bind to `0.0.0.0` (or to the docker bridge IP),
+not to `127.0.0.1`.** The host's loopback is not visible to processes inside
+the nginx container. Check with:
+
+```bash
+ss -tlnp | grep :3000
+# Good:  0.0.0.0:3000  /  :::3000
+# Bad:   127.0.0.1:3000
+```
+
+Rely on your firewall (AWS security group, ufw, etc.) to block external
+access to the upstream port — don't lean on `127.0.0.1` binding for security
+once nginx is in the picture.
+
+## Cert expiry monitoring (do not skip)
+
+`certbot renew` can fail silently for 60+ days (revoked token, Cloudflare API
+change, container OOM). `check-cert-expiry.sh` is an out-of-band probe.
 
 ```bash
 chmod +x check-cert-expiry.sh
 
-# 每日早上 9 點檢查
+# Local cron — checks every cert in certbot/conf/live/ daily at 9am
 crontab -e
 0 9 * * * cd /path/to/project && ./check-cert-expiry.sh
 ```
 
-剩餘 < 14 天會 exit 1（搭配 cron 的 MAILTO 即可收到通知）。
-
-### 方法 B：搭配 healthchecks.io（免費，推薦）
+With [healthchecks.io](https://healthchecks.io) (recommended — the cron
+itself can fail silently):
 
 ```bash
-# 在 cron 中設定環境變數
 0 9 * * * cd /path/to/project && \
-    HEALTHCHECK_URL='https://hc-ping.com/xxx-xxx-xxx' \
-    HEALTHCHECK_FAIL_URL='https://hc-ping.com/xxx-xxx-xxx/fail' \
+    HEALTHCHECK_URL='https://hc-ping.com/...' \
+    HEALTHCHECK_FAIL_URL='https://hc-ping.com/.../fail' \
     ./check-cert-expiry.sh
 ```
 
-healthchecks.io 在沒收到心跳時會主動通知你（email / Slack / Discord）。
+## Logging
 
-## 日誌
+Docker's `json-file` driver is configured for nginx with 10 MB × 3 file
+rotation. For centralized logging, prefer a Docker logging driver or a
+sidecar over hand-rolled upload scripts:
 
-Docker 的 `json-file` driver 已設定自動輪替（10MB × 3 檔）。
-
-若要集中式日誌，建議使用 Docker 內建 driver 而非自寫腳本：
 - AWS CloudWatch → `awslogs` driver
 - Loki → `loki` driver
-- Fluentd → `fluentd` driver
+- Generic → fluent-bit / Vector as a sidecar
 
-## 故障排除
+## Troubleshooting
 
-### Nginx 起不來，報找不到證書
+### Nginx won't start, complains about a missing cert
 
-`setup-ssl.sh` 沒成功跑過：
+You probably skipped `./add-domain.sh` for one of the domains referenced in a
+vhost file. Check `ls certbot/conf/live/`.
+
+### `HTTP/2 403` with `server: cloudflare`, `cf-mitigated: challenge`
+
+This is almost never Cloudflare's bot detection. The far more common cause
+is that **Cloudflare can't reach your origin** — your security group blocks
+inbound 443 — so Cloudflare returns its own error page. Check first:
+
 ```bash
-ls certbot/conf/live/${DOMAIN}/
-# 應該要有 fullchain.pem、privkey.pem、chain.pem
+nc -zv <ec2-ip> 443    # from outside the host
 ```
 
-### 證書沒有續期
+If that fails, open inbound 443 in the AWS security group (or equivalent).
+
+### Renewal doesn't happen
 
 ```bash
 docker logs certbot
 cat certbot/logs/letsencrypt.log
 ```
-常見：API Token 權限不足或過期（需要 `Zone:DNS:Edit`）。
 
-### Nginx 沒有自動 reload
+The common cause is an API token without `Zone:DNS:Edit` permission for the
+zone being renewed.
+
+### Reload doesn't happen after renewal
 
 ```bash
 docker logs certbot-watcher
 ```
-如果看到 connection refused，是 `docker-proxy` 沒起來：`docker compose restart docker-proxy`。
 
-### 手動強制續期（測試用）
+If you see connection refused, `docker-proxy` isn't healthy:
+`docker compose restart docker-proxy`.
+
+### Force a renewal for testing
 
 ```bash
 docker compose exec certbot certbot renew --force-renewal \
@@ -167,14 +298,52 @@ docker compose exec certbot certbot renew --force-renewal \
     --dns-cloudflare-propagation-seconds 30
 ```
 
-### 撞到 Let's Encrypt rate limit
+### Rate-limited by Let's Encrypt
 
-正式端點每個域名一週 5 張同 SAN 證書。如果在 debug，**改用 `--staging`**。被鎖時可在 [crt.sh](https://crt.sh) 查看已發行記錄。
+Production allows 5 duplicate certs per registered domain per week. While
+debugging, always use `--staging` first. See issued certs at
+[crt.sh](https://crt.sh).
 
-## 安全注意事項
+## Security checklist
 
-- `.env` 由 `setup-ssl.sh` 自動 `chmod 600`
-- `cloudflare.ini` 放在 `certbot/secrets/`（**不在** `certbot/conf/`），不會被 nginx 容器讀到
-- Docker socket 透過 `docker-socket-proxy` 限縮權限
-- 安全群組 / 防火牆只開放 80（ACME 重導）與 443
-- API Token **必須**綁定特定 Zone，不要用 Global API Key
+- `.env` is `chmod 600` and gitignored
+- `cloudflare.ini` lives in `certbot/secrets/`, NOT `certbot/conf/` — nginx
+  mounts `certbot/conf` read-only, so a compromised nginx container can read
+  whatever is in there; the token belongs elsewhere
+- `docker-proxy` whitelists exactly the API endpoints the watcher uses
+- Cloudflare API token is zone-scoped, not a Global API Key
+- Firewall opens only 80 (for ACME HTTP-01 fallback / HTTP-to-HTTPS redirect)
+  and 443
+- HSTS (`max-age=63072000`) is set in `security-headers.conf` — appropriate
+  once you've verified everything works, but be aware browsers will refuse
+  plain HTTP for two years afterward
+
+## File map
+
+```
+.
+├── .env.example                       # template for .env (EMAIL, CF_API_TOKEN)
+├── .env                               # actual secrets (gitignored, chmod 600)
+├── docker-compose.yml                 # the four-container stack
+├── bootstrap.sh                       # one-time: dirs, cloudflare.ini, hook
+├── add-domain.sh                      # per-domain: cert + vhost scaffold
+├── check-cert-expiry.sh               # cron probe for silent renewal failure
+├── nginx/
+│   ├── snippets/                      # shared, included by vhosts
+│   │   ├── ssl-common.conf
+│   │   ├── security-headers.conf
+│   │   ├── gzip.conf
+│   │   ├── proxy-headers.conf
+│   │   └── acme-challenge.conf
+│   ├── vhosts/                        # mounted to /etc/nginx/conf.d
+│   │   ├── 00-http-globals.conf       # http-scope helpers (loaded first)
+│   │   ├── _example.conf.example      # skeleton (not loaded by nginx)
+│   │   └── <domain>.conf              # generated by add-domain.sh
+│   └── html/                          # static fallback (gitignored)
+└── certbot/                           # gitignored entirely
+    ├── conf/                          # certs (nginx mounts this read-only)
+    ├── secrets/cloudflare.ini         # CF token (chmod 600, certbot only)
+    ├── signal/                        # IPC between certbot and watcher
+    ├── www/                           # ACME HTTP-01 challenge dir (unused with DNS-01)
+    └── logs/
+```
