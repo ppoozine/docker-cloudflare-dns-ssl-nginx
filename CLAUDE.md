@@ -16,12 +16,12 @@ for visibility into how nginx + certbot actually work.
 
 ## Architecture (one paragraph)
 
-`nginx` (1.27-alpine) terminates TLS and reverse-proxies to apps on the host
-via `host.docker.internal`. `certbot` (dns-cloudflare:v2.11.0) runs
+`nginx` (1.30-alpine) terminates TLS and reverse-proxies to apps on the host
+via `host.docker.internal`. `certbot` (dns-cloudflare:v5.10.0) runs
 `certbot renew` every 12h; on success its post-hook touches
 `certbot/signal/reload`. `certbot-watcher` polls that path every 30s and,
 when present, calls `docker exec nginx nginx -s reload` through
-`docker-proxy` (`tecnativa/docker-socket-proxy:0.3.0`), which whitelists
+`docker-proxy` (`tecnativa/docker-socket-proxy:3.4`), which whitelists
 exactly the daemon endpoints `exec` needs. The flag file is removed **only on
 successful reload** so a transient reload failure retries on the next cycle.
 

@@ -154,7 +154,7 @@ else
         -v "${SCRIPT_DIR}/certbot/conf:/etc/letsencrypt" \
         -v "${SCRIPT_DIR}/certbot/logs:/var/log/letsencrypt" \
         -v "${SCRIPT_DIR}/certbot/secrets/cloudflare.ini:/run/secrets/cloudflare.ini:ro" \
-        certbot/dns-cloudflare:v2.11.0 certonly \
+        certbot/dns-cloudflare:v5.10.0 certonly \
         --dns-cloudflare \
         --dns-cloudflare-credentials /run/secrets/cloudflare.ini \
         --dns-cloudflare-propagation-seconds 30 \

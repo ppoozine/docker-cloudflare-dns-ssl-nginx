@@ -71,9 +71,9 @@ The cert issuance is a one-shot `docker run` — it doesn't disturb the running
 - **Cloudflare proxy mode (orange cloud)**: SSL/TLS encryption mode must
   be `Full (strict)` to validate our LE cert. Otherwise CF returns 521 /
   525 / 526.
-- **ARM image compatibility**: all pinned images (`nginx:1.27-alpine`,
-  `certbot/dns-cloudflare:v2.11.0`, `docker:24-cli`,
-  `tecnativa/docker-socket-proxy:0.3.0`) ship multi-arch manifests.
+- **ARM image compatibility**: all pinned images (`nginx:1.30-alpine`,
+  `certbot/dns-cloudflare:v5.10.0`, `docker:29-cli`,
+  `tecnativa/docker-socket-proxy:3.4`) ship multi-arch manifests.
 
 ## Verifying a deploy
 

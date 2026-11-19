@@ -163,10 +163,10 @@ Four containers:
 
 | Container | Image | Role |
 |-----------|-------|------|
-| `nginx` | `nginx:1.27-alpine` | Public-facing HTTP(S); loads `nginx/vhosts/*.conf` and includes `nginx/snippets/*.conf` |
-| `certbot` | `certbot/dns-cloudflare:v2.11.0` | Every 12h runs `certbot renew` (DNS-01) |
-| `docker-proxy` | `tecnativa/docker-socket-proxy:0.3.0` | Whitelist proxy in front of `/var/run/docker.sock` |
-| `certbot-watcher` | `docker:24-cli` | Detects renewal signal, asks docker-proxy to `nginx -s reload` |
+| `nginx` | `nginx:1.30-alpine` | Public-facing HTTP(S); loads `nginx/vhosts/*.conf` and includes `nginx/snippets/*.conf` |
+| `certbot` | `certbot/dns-cloudflare:v5.10.0` | Every 12h runs `certbot renew` (DNS-01) |
+| `docker-proxy` | `tecnativa/docker-socket-proxy:3.4` | Whitelist proxy in front of `/var/run/docker.sock` |
+| `certbot-watcher` | `docker:29-cli` | Detects renewal signal, asks docker-proxy to `nginx -s reload` |
 
 Renewal flow:
 
