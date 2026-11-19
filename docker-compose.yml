@@ -1,6 +1,6 @@
 services:
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:1.30-alpine
     container_name: nginx
     restart: unless-stopped
     ports:
@@ -31,7 +31,7 @@ services:
         max-file: "3"
 
   certbot:
-    image: certbot/dns-cloudflare:v2.11.0
+    image: certbot/dns-cloudflare:v5.10.0
     container_name: certbot
     restart: unless-stopped
     volumes:
@@ -51,7 +51,7 @@ services:
       done"
 
   docker-proxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
+    image: tecnativa/docker-socket-proxy:3.4
     container_name: docker-proxy
     restart: unless-stopped
     environment:
@@ -64,7 +64,7 @@ services:
       - watcher-net
 
   certbot-watcher:
-    image: docker:24-cli
+    image: docker:29-cli
     container_name: certbot-watcher
     restart: unless-stopped
     environment:
